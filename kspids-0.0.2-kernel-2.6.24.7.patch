@@ -1,0 +1,321 @@
+--- linux-2.6.24.7_orig/fs/exec.c	2008-05-07 01:22:34.000000000 +0200
++++ linux-2.6.24.7_new/fs/exec.c	2008-05-09 16:01:25.000000000 +0200
+@@ -1352,6 +1352,10 @@ int do_execve(char * filename,
+ 	retval = search_binary_handler(bprm,regs);
+ 	if (retval >= 0) {
+ 		/* execve success */
++		
++		/* register exec in spids */
++		security_kspids_register(KSPIDS_EXECVE, current->user->uid, filename);
++
+ 		free_arg_pages(bprm);
+ 		security_bprm_free(bprm);
+ 		acct_update_integrals(current);
+--- linux-2.6.24.7_orig/include/linux/security.h	2008-05-07 01:22:34.000000000 +0200
++++ linux-2.6.24.7_new/include/linux/security.h	2008-05-09 16:02:43.000000000 +0200
+@@ -110,6 +110,9 @@ struct request_sock;
+ #define LSM_UNSAFE_PTRACE	2
+ #define LSM_UNSAFE_PTRACE_CAP	4
+ 
++/* kernel service profile IDS */
++#define KSPIDS_EXECVE		1
++
+ #ifdef CONFIG_SECURITY
+ 
+ /**
+@@ -1429,6 +1432,10 @@ struct security_operations {
+ 	int (*xfrm_decode_session)(struct sk_buff *skb, u32 *secid, int ckall);
+ #endif	/* CONFIG_SECURITY_NETWORK_XFRM */
+ 
++#ifdef CONFIG_SECURITY_KSPIDS
++	void (*kspids_register)(int cmd, uid_t uid, char *filename);
++#endif	/* CONFIG_SECURITY_KSPIDS */
++
+ 	/* key management security hooks */
+ #ifdef CONFIG_KEYS
+ 	int (*key_alloc)(struct key *key, struct task_struct *tsk, unsigned long flags);
+@@ -2559,6 +2566,15 @@ static inline void security_skb_classify
+ 
+ #endif	/* CONFIG_SECURITY_NETWORK_XFRM */
+ 
++#ifdef CONFIG_SECURITY_KSPIDS
++void security_kspids_register(int cmd, uid_t uid, char *filename);
++#else /* CONFIG_SECURITY_KSPIDS */
++static inline void security_kspids_register(int cmd, uid_t uid, char *filename)
++{	
++}
++#endif /* CONFIG_SECURITY_KSPIDS */
++
++
+ #ifdef CONFIG_KEYS
+ #ifdef CONFIG_SECURITY
+ 
+--- linux-2.6.24.7_orig/security/security.c	2008-05-07 01:22:34.000000000 +0200
++++ linux-2.6.24.7_new/security/security.c	2008-05-09 16:03:48.000000000 +0200
+@@ -1061,6 +1061,13 @@ EXPORT_SYMBOL(security_skb_classify_flow
+ 
+ #endif	/* CONFIG_SECURITY_NETWORK_XFRM */
+ 
++#ifdef CONFIG_SECURITY_KSPIDS
++void security_kspids_register(int cmd, uid_t uid, char *filename)
++{
++	security_ops->kspids_register(cmd, uid, filename);
++}
++#endif /* CONFIG_SECURITY_KSPIDS */
++
+ #ifdef CONFIG_KEYS
+ 
+ int security_key_alloc(struct key *key, struct task_struct *tsk, unsigned long flags)
+--- linux-2.6.24.7_orig/security/Makefile	2008-05-07 01:22:34.000000000 +0200
++++ linux-2.6.24.7_new/security/Makefile	2008-05-09 16:03:34.000000000 +0200
+@@ -16,3 +16,4 @@ obj-$(CONFIG_SECURITY)			+= security.o d
+ obj-$(CONFIG_SECURITY_SELINUX)		+= selinux/built-in.o
+ obj-$(CONFIG_SECURITY_CAPABILITIES)	+= commoncap.o capability.o
+ obj-$(CONFIG_SECURITY_ROOTPLUG)		+= commoncap.o root_plug.o
++obj-$(CONFIG_SECURITY_KSPIDS)		+= kspids.o
+--- linux-2.6.24.7_orig/security/Kconfig	2008-05-07 01:22:34.000000000 +0200
++++ linux-2.6.24.7_new/security/Kconfig	2008-05-09 16:03:11.000000000 +0200
+@@ -103,6 +103,13 @@ config SECURITY_ROOTPLUG
+ 	  
+ 	  If you are unsure how to answer this question, answer N.
+ 
++config SECURITY_KSPIDS
++	bool "Kernel Service Profile IDS"
++	depends on SECURITY
++	help
++	  KSPIDS monitors the behavior of users of services. It can be
++	  configured by the super user.
++
+ source security/selinux/Kconfig
+ 
+ endmenu
+--- /dev/null	2008-04-23 18:27:10.000000000 +0200
++++ linux-2.6.24.7_new/security/kspids.c	2008-05-09 16:06:34.000000000 +0200
+@@ -0,0 +1,227 @@
++/*
++ * Kernel Service Profile Intrusion Detection System
++ *
++ * Written by Steffen Wendzel
++ *
++ * Copyright (C) 2008 Steffen Wendzel <steffen (at) wendzel (dot) de>
++ *
++ *	This program is free software; you can redistribute it and/or
++ *	modify it under the terms of the GNU General Public License as
++ *	published by the Free Software Foundation, version 3 of the
++ *	License.
++ */
++
++#include <linux/kernel.h>
++#include <linux/init.h>
++#include <linux/security.h>
++
++#define KSPIDS_UID_MIN			1
++#define KSPIDS_UID_MAX			999
++
++#define KSPIDS_ATKLVL_DEF		20	/* def. atk-level for new usr */
++#define KSPIDS_ATKLVL_MAX		99	/* "max." atk-level (=max. risk) */
++#define KSPIDS_ATKLVL_HIGH		80
++#define KSPIDS_ATKLVL_MEDIUM		60
++#define KSPIDS_ATKLVL_LOW		40
++#define KSPIDS_ATKLVL_DEFDEC		10	/* val. to dec. the atk-level if nothing happens */
++
++#define KSPIDS_COUNTER_MAX		0x7f
++#define KSPIDS_ATKLVL_INC_NEWPROG	80	/* value to inc. on new prog */
++#define KSPIDS_ATKLVL_CNTHIGH		99
++#define KSPIDS_ATKLVL_INC_CNTHIGH	0	/* don't increment on usual prog */
++#define KSPIDS_ATKLVL_CNTMEDIUM		20
++#define KSPIDS_ATKLVL_INC_CNTMEDIUM	15	/* medium-used prog */
++#define KSPIDS_ATKLVL_CNTLOW		3
++#define KSPIDS_ATKLVL_INC_CNTLOW	30	/* unfrequently used prog */
++#define KSPIDS_ATKLVL_INC_CNTLIKENEW	35	/* > 1 && < KSPIDS_ATKLVL_CNTLOW */
++
++struct kspids_filelist {
++	char *filename;
++	/* counter: 0 ... KSPIDS_COUNTER_MAX (=max val.) */
++	int counter;
++	struct list_head list;
++};
++
++struct kspids_uidlist {
++	uid_t uid;
++	s16 atklvl;
++	struct kspids_filelist *fl;
++	struct list_head list;
++};
++
++static struct kspids_uidlist *ul = NULL;
++
++static void kspids_alert_memalloc(void);
++
++static void kspids_alert_memalloc()
++{
++	printk(KERN_DEBUG "kspids:kmalloc() returned NULL\n");
++}
++
++static void kspids_alert_idslvl(struct kspids_uidlist *ulp)
++{
++	static char low[] = "low",
++		    medium[] = "medium",
++		    high[] = "HIGH";
++	char *p;
++
++	if (ulp->atklvl > KSPIDS_ATKLVL_HIGH)
++		p = high;
++	else if (ulp->atklvl > KSPIDS_ATKLVL_MEDIUM)
++		p = medium;
++	else
++		p = low;
++	
++	printk("kspids attacker level alert for user %u (level is %s)\n",
++		ulp->uid, p);
++}
++
++static void kspids_ids_atklvl(struct kspids_uidlist *ulp)
++{
++	/* check the value and print out warning log message, if needed */
++	
++	if (ulp->atklvl > KSPIDS_ATKLVL_LOW)
++		kspids_alert_idslvl(ulp);
++	
++	/* default-decrease attacker level now */
++	ulp->atklvl -= KSPIDS_ATKLVL_DEFDEC;
++	/* if -lt 0, set back to zero */
++	if (ulp->atklvl < (s16) 0)
++		ulp->atklvl = 0;
++	/* if -gt MAX, set back to MAX */
++	if (ulp->atklvl > KSPIDS_ATKLVL_MAX)
++		ulp->atklvl = KSPIDS_ATKLVL_MAX;
++}
++
++static void kspids_register_filename(struct kspids_uidlist *ulp, char *filename)
++{
++	struct kspids_filelist *new = NULL;
++
++	if (!ulp->fl) {
++		ulp->fl = (struct kspids_filelist *)
++			kmalloc(sizeof(struct kspids_filelist), GFP_KERNEL);
++		if (!ulp->fl) {
++			kspids_alert_memalloc();
++			return;
++		}
++		INIT_LIST_HEAD(&ulp->fl->list);
++		new = ulp->fl;
++	} else {
++		/* try to find the filename and add it, in the case we could
++		 * not find it.
++		 */
++		struct list_head *p, *n;
++		struct kspids_filelist *ufp;
++		u8 found = 0;
++
++		list_for_each_safe(p, n, &ulp->fl->list) {
++			ufp = list_entry(p, struct kspids_filelist, list);
++			if (strcmp(ufp->filename, filename) == 0) {
++				found = 1;
++				if (ufp->counter < KSPIDS_COUNTER_MAX) {
++					ufp->counter++;
++					if (ufp->counter > KSPIDS_ATKLVL_CNTHIGH)
++						ulp->atklvl += KSPIDS_ATKLVL_INC_CNTHIGH;
++					else if (ufp->counter > KSPIDS_ATKLVL_CNTMEDIUM)
++						ulp->atklvl += KSPIDS_ATKLVL_INC_CNTMEDIUM;
++					else if (ufp->counter > KSPIDS_ATKLVL_CNTLOW)
++						ulp->atklvl += KSPIDS_ATKLVL_INC_CNTLOW;
++					else /* still very unfrequently used tool! */
++						ulp->atklvl += KSPIDS_ATKLVL_INC_CNTLIKENEW;
++				}
++			}
++		}
++		if (!found) {
++			new = (struct kspids_filelist *)
++				kmalloc(sizeof(struct kspids_filelist), GFP_KERNEL);
++			if (!new) {
++				kspids_alert_memalloc();
++				return;
++			}
++			list_add(&new->list, &ulp->fl->list);
++		}
++	}
++	if (new) {
++		/* this should not lead to an integer overflow because of MAX_PATHLEN */
++		u16 len;
++		len = strlen(filename) * sizeof(char);
++		new->filename = (char *) kmalloc(len + 1, GFP_KERNEL);
++		if (!new->filename) {
++			kspids_alert_memalloc();
++			return;
++		}
++		new->filename[len] = '\0';
++		strncpy(new->filename, filename, len);
++		new->counter = 1;
++		/* increase attacker level here */
++		ulp->atklvl += KSPIDS_ATKLVL_INC_NEWPROG;
++		printk("kspids: registered UID=%u, binary=%s\n", ulp->uid, filename);
++	}
++	return;
++}
++
++void security_kspids_register(int cmd, uid_t uid, char *filename)
++{
++	struct kspids_uidlist *new = NULL;
++	
++	/* only monitor UIDs within a given range */
++	if (uid < KSPIDS_UID_MIN || uid > KSPIDS_UID_MAX)
++		return;
++
++	if (!ul) {
++		/* create a new ul list head for this user */
++		ul = (struct kspids_uidlist *)
++			kmalloc(sizeof(struct kspids_uidlist), GFP_KERNEL);
++		if (!ul) {
++			kspids_alert_memalloc();
++			return;
++		}
++		INIT_LIST_HEAD(&ul->list);
++		new = ul;
++	} else {
++		/* try to find the user and add him, if not found, at
++		 * the end of the list.
++		 */
++		struct list_head *p, *n;
++		struct kspids_uidlist *ulp;
++		u8 found = 0;
++
++		list_for_each_safe(p, n, &ul->list) {
++			ulp = list_entry(p, struct kspids_uidlist, list);
++			if (ulp->uid == uid) {
++				found = 1;
++				switch (cmd) {
++				case KSPIDS_EXECVE:
++					kspids_register_filename(ulp, filename);
++					break;
++				}
++				kspids_ids_atklvl(ulp);
++			}
++		}
++		if (!found) {
++			/* create new element */
++			new = (struct kspids_uidlist *)
++				kmalloc(sizeof(struct kspids_uidlist), GFP_KERNEL);
++			if (!new) {
++				kspids_alert_memalloc();
++				return;
++			}
++			list_add(&new->list, &ul->list);
++		}
++
++	}
++	/* if there is a new element, fill it with data */
++	if (new) {
++		new->uid = uid;
++		new->fl = NULL;
++		new->atklvl = KSPIDS_ATKLVL_DEF;
++		switch (cmd) {
++		case KSPIDS_EXECVE:
++			kspids_register_filename(new, filename);
++			break;
++		}
++		kspids_ids_atklvl(new);
++	}
++	return;
++}
++
