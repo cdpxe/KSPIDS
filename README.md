@@ -24,4 +24,10 @@ You need to calibrate KSPIDS via *kspids.c*. If you skip this part, you will may
 
 # Demo output
 
-See my [website](http://steffen-wendzel.blogspot.com/p/security-hacks.html#kspids) for some screenshots.
+Here you can see a typical simulated attack: The user mysql (used to execute the MySQL database daemon) was "exploited" and can now execute something like /bin/echo what lets KSPIDS print out new log messages:
+
+<img src="http://www.wendzel.de/images/kspids_pic1.jpg" />
+
+Here you can see how the attacker level decreases after some time due to "normal" behavior:
+
+<img src="http://www.wendzel.de/images/kspids_pic2.jpg" />
