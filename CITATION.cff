@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+authors:
+- family-names: "Wendzel"
+  given-names: "Steffen"
+  orcid: "https://orcid.org/0000-0002-1913-5912"
+title: "KSPIDS: Kernel Service Profile Intrusion Detection System"
+version: 1.0.0
+date-released: 2008-05-09
+url: "https://github.com/cdpxe/KSPIDS"
+preferred-citation:
+  type: software
+  authors:
+  - family-names: "Wendzel"
+    given-names: "Steffen"
+    orcid: "https://orcid.org/0000-0002-1913-5912"
+  title: "KSPIDS: Kernel Service Profile Intrusion Detection System"
+  year: 2008
