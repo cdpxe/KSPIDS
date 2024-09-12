@@ -1,5 +1,5 @@
 # KSPIDS
-PoC code for a simple user-based intrusion detection system for the Linux kernel. I wrote this code as an undergraduate student in 2008. It was designed for Linux 2.6. I hope it is still of use.
+PoC code for a simple user-based intrusion detection system for the Linux kernel. I wrote this code as an undergraduate student in 2008. It was designed for Linux 2.6. I hope it is still of use. More of my research projects and papers can be found on [my website](https://www.wendzel.de).
 
 
 KSPIDS stands for *Kernel Service Profile Intrusion Detection System*. It is a kernel code patch for Linux systems that monitors the programs a service user (e.g. `www-data`) uses. It alerts you if - for example - your `www-data` user now executes something like `/bin/sh`. Please note that KSPIDS is based on my other project [FUPIDS](https://github.com/cdpxe/OpenBSDhacks).
